@@ -125,6 +125,10 @@ namespace SoulsFormats
                     int compressionLevel = br.GetByte(0x30);
                     type = compressionLevel == 9 ? Type.DCX_KRAK_MAX : Type.DCX_KRAK;
                 }
+                else if (format == "ZSTD")
+                {
+                    type = Type.DCX_ZSTD;
+                }
             }
             else
             {
@@ -155,6 +159,8 @@ namespace SoulsFormats
                 return DecompressDCXKRAK(br);
             else if (type == Type.DCX_KRAK_MAX)
                 return DecompressDCXKRAK(br, 9);
+            else if (type == Type.DCX_ZSTD)
+                return DecompressZSTD(br);
             else
                 throw new FormatException("Unknown DCX format.");
         }
@@ -383,6 +389,39 @@ namespace SoulsFormats
             return Oodle.GetOodleCompressor(compressionLevel).Decompress(compressed, uncompressedSize);
         }
 
+        private static Memory<byte> DecompressZSTD(BinaryReaderEx br, byte compressionLevel = 21)
+        {
+            br.AssertASCII("DCX\0");
+            br.AssertInt32(0x11000);
+            br.AssertInt32(0x18);
+            br.AssertInt32(0x24);
+            br.AssertInt32(0x44);
+            br.AssertInt32(0x4C);
+            br.AssertASCII("DCS\0");
+            uint uncompressedSize = br.ReadUInt32();
+            uint compressedSize = br.ReadUInt32();
+            br.AssertASCII("DCP\0");
+            br.AssertASCII("ZSTD");
+            br.AssertInt32(0x20);
+            br.AssertByte(compressionLevel);
+            br.AssertByte(0);
+            br.AssertByte(0);
+            br.AssertByte(0);
+            br.AssertInt32(0);
+            br.AssertInt32(0);
+            br.AssertInt32(0);
+            br.AssertInt32(0x10100);
+            br.AssertASCII("DCA\0");
+            br.AssertInt32(8);
+
+            var compressed = br.ReadSpanView<byte>((int)compressedSize);
+
+            using ZstdSharp.Decompressor decompressor = new ();
+            Memory<byte> uncompressed = new(new byte[uncompressedSize]);
+            decompressor.Unwrap(compressed, uncompressed.Span);
+            return uncompressed;
+        }
+
         #region Public Compress
         /// <summary>
         /// Compress a DCX file to an array of bytes using the specified DCX type.
@@ -427,6 +466,8 @@ namespace SoulsFormats
                 CompressDCXKRAK(data, bw);
             else if (type == Type.DCX_KRAK_MAX)
                 CompressDCXKRAK(data, bw, 9);
+            else if (type == Type.DCX_ZSTD)
+                CompressZSTD(data, bw);
             else if (type == Type.Unknown)
                 throw new ArgumentException("You cannot compress a DCX with an unknown type.");
             else
@@ -643,6 +684,39 @@ namespace SoulsFormats
             bw.Pad(0x10);
         }
 
+        private static void CompressZSTD(Span<byte> data, BinaryWriterEx bw, byte compressionLevel = 21)
+        {
+            using ZstdSharp.Compressor compressor = new();
+            compressor.SetParameter(ZSTD_cParameter.ZSTD_c_checksumFlag, 1);
+            compressor.SetParameter(ZSTD_cParameter.ZSTD_c_enableLongDistanceMatching, 0);
+            Span<byte> compressed = compressor.Wrap(data);
+
+            bw.WriteASCII("DCX\0");
+            bw.WriteInt32(0x11000);
+            bw.WriteInt32(0x18);
+            bw.WriteInt32(0x24);
+            bw.WriteInt32(0x44);
+            bw.WriteInt32(0x4C);
+            bw.WriteASCII("DCS\0");
+            bw.WriteUInt32((uint)data.Length);
+            bw.WriteUInt32((uint)compressed.Length);
+            bw.WriteASCII("DCP\0");
+            bw.WriteASCII("ZSTD");
+            bw.WriteInt32(0x20);
+            bw.WriteByte(compressionLevel);
+            bw.WriteByte(0);
+            bw.WriteByte(0);
+            bw.WriteByte(0);
+            bw.WriteInt32(0);
+            bw.WriteInt32(0);
+            bw.WriteInt32(0);
+            bw.WriteInt32(0x10100);
+            bw.WriteASCII("DCA\0");
+            bw.WriteInt32(8);
+            bw.WriteBytes(compressed);
+            bw.Pad(0x10);
+        }
+
         /// <summary>
         /// Specific compression format used for a certain file.
         /// </summary>
@@ -711,7 +785,12 @@ namespace SoulsFormats
             /// <summary>
             /// DCX header, different Oodle compression. Used in Armored Core VI.
             /// </summary>
-            DCX_KRAK_MAX
+            DCX_KRAK_MAX,
+
+            /// <summary>
+            /// DCX header, zstd compression. Used in ER 1.12 regulation.
+            /// </summary>
+            DCX_ZSTD
         }
 
         /// <summary>
